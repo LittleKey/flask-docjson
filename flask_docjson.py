@@ -1,49 +1,14 @@
 # -*- coding: utf-8 -*-
+
 """
     flask-docjson
     ~~~~~~~~~~~~~
 
-    Validate flask request and response json schemas via docstring.
+    Validate flask request via docstring.
 
     :copyright: (c) 2016 by Chao Wang (hit9).
     :license: BSD, see LICENSE for more details.
 """
-
-import ctypes
-from functools import wraps
-import json
-import sys
-
-from flask import request, Response
-from ply import lex, yacc
-
-__version__ = '0.1.7'
-
-
-###
-# Compact
-###
-
-if sys.version_info.major == 3:
-    basestring = (str, bytes)
-    unicode = str
-    long = int
-
-    def json_loads(data):
-        if isinstance(data, bytes):
-            data = str(data, 'utf8')
-        return json.loads(data)
-
-    def get_func_code(func):
-        return func.__code__
-
-else:
-
-    def json_loads(data):
-        return json.loads(data)
-
-    def get_func_code(func):
-        return func.func_code
 
 
 ###
@@ -52,97 +17,46 @@ else:
 
 class Error(Exception):
     """A flask-docjson error occurred."""
-    pass
 
 
 class ParserError(Error):
-    """A parser error occurred."""
+    """A parser error occurred.
+
+    Catching this error will catch both
+    :exc:`~flask_docjson.LexerError` and
+    :exc:`~flask_docjson.ParserError` errors.
+    """
 
 
 class LexerError(ParserError):
     """A lexer error occurred."""
-    pass
 
 
 class GrammarError(ParserError):
-    """A grammar error occurred."""
-    pass
-
-
-class ValidationError(Error):
-    """A validation error occurred."""
-
-    def __init__(self, code=None, reason=None, value=None, key=None):
-        self.code = code
-        self.reason = reason
-        self.value = value
-        self.key = key
-
-    def __str__(self):
-        try:
-            return 'ValidationError: {0}, {1}, {2} => {3}'.format(
-                self.code, self.reason, repr(self.key or ''), repr(self.value))
-        except (ValueError, TypeError):
-            return 'ValidationError'
-
-    def __repr__(self):
-        return '<{}>'.format(str(self))
-
-
-class RequestValidationError(ValidationError):
-    """A validation error occurred while validating request data."""
-
-
-class ResponseValidationError(ValidationError):
-    """A validation error occurred while validating response data."""
-    pass
+    """A parser error occurred."""
 
 
 class _InternalError(Exception):
-    """Internal used purpose exception base."""
-    pass
+    """Internal purpose error. It will be replaced by
+    :exc:`~flask_docjson.Error` after raised.
+    """
 
 
 class _InternalLexerError(_InternalError):
-    """Internal used purpose lexer error base."""
-    pass
+    """An internal lexer error occurred."""
 
 
-class _InternalGrammarError(_InternalError):
-    """Internal used purpose grammar error base."""
+class _InternalGrammarError(_InternalGrammarError):
+    """An internal parser error occurred."""
 
-
-ErrInvalidBool = (0x0100, "invalid boolean")
-ErrInvalidU8 = (0x0200, "invalid u8")
-ErrInvalidU16 = (0x0300, "invalid u16")
-ErrInvalidU32 = (0x0400, "invalid u32")
-ErrInvalidU64 = (0x0500, "invalid u64")
-ErrInvalidI8 = (0x0600, "invalid i8")
-ErrInvalidI16 = (0x0700, "invalid i16")
-ErrInvalidI32 = (0x0800, "invalid i32")
-ErrInvalidI64 = (0x0900, "invalid i64")
-ErrInvalidFloat = (0x1000, "invalid float")
-ErrInvalidString = (0x1100, "invalid string")
-ErrNotArray = (0x1200, "not an array")
-ErrShouldBeEmptyArray = (0x1201, "should be an empty array")
-ErrArrayElementsNotEnough = (0x1202, "array elements not enough")
-ErrArrayLength = (0x1203, "invalid array length")
-ErrNotObject = (0x1300, "not an object")
-ErrObjectKeyNotFound = (0x1301, "key not found in object")
-ErrObjectUnexpectedKey = (0x1302, "unexpected key in object")
-ErrNullable = (0x1400, "cannot be null")
-ErrShouldBeNull = (0x1401, "should be null")
-ErrInvalidJSON = (0x1500, "invalid json")
-ErrInvalidMethod = (0x1600, "invalid method")
-ErrRouteVarNotFound = (0x1700, "route variable not found")
-ErrInvalidResponse = (0x1800, "invalid response")
 
 ###
-# Schema
+# Globals
 ###
 
-S_ELLIPSIS = 0
+S_ELLIPSIS = 0  # Ellipsis is ``...``
 
+# Base types
 T_BOOL = 1
 T_U8 = 2
 T_U16 = 3
@@ -155,6 +69,7 @@ T_I64 = 9
 T_FLOAT = 10
 T_STRING = 11
 
+# HTTP methods
 M_POST = 1
 M_GET = 2
 M_PUT = 3
@@ -168,11 +83,12 @@ M_OPTIONS = 7
 # Lexer
 ###
 
-literals = ':,()[]{}/<>*'
+literals = ':,()[]{}/<>*?=&'
 
-t_ignore = ' \t\r'   # whitespace
+t_ignore = ' \t\r'   # Ignore white spaces
 
 tokens = (
+    # HTTP methods
     'POST',
     'GET',
     'PUT',
@@ -180,7 +96,9 @@ tokens = (
     'PATCH',
     'HEAD',
     'OPTIONS',
+    # Ellipsis
     'ELLIPSIS',
+    # Base types
     'BOOL',
     'U8',
     'U16',
@@ -192,6 +110,7 @@ tokens = (
     'I64',
     'FLOAT',
     'STRING',
+    # Others
     'IDENTIFIER',
     'STATIC_ROUTE',
     'STATUS_CODE_MATCHER',
@@ -201,64 +120,74 @@ tokens = (
 
 
 def t_error(t):
-    raise _InternalLexerError('illegal char %r at line %d' % (t.value[0],
-                                                              t.lineno))
+    raise _InternalLexerError("illegal char '{0}' at line {1}".format(
+        t.value[0], t.lineno))
 
 
 def t_ignore_COMMENT(t):
     r'\/\/[^\n]*'
+    # Ignore comments, e.g.: ``// this is an example comment``
 
 
 def t_newline(t):
     r'\n+'
+    # Count newline to ``lexer.lineno``
     t.lexer.lineno += len(t.value)
 
 
 def t_POST(t):
     r'POST'
+    # HTTP method ``POST``
     t.value = M_POST
     return t
 
 
 def t_GET(t):
     r'GET'
+    # HTTP method ``GET``
     t.value = M_GET
     return t
 
 
 def t_PUT(t):
     r'PUT'
+    # HTTP method ``PUT``
     t.value = M_PUT
     return t
 
 
 def t_DELETE(t):
     r'DELETE'
+    # HTTP method ``DELETE``
     t.value = M_DELETE
     return t
 
 
 def t_HEAD(t):
     r'HEAD'
+    # HTTP method ``HEAD``
     t.value = M_HEAD
     return t
 
 
 def t_OPTIONS(t):
     r'OPTIONS'
+    # HTTP method ``OPTIONS``
     t.value = M_OPTIONS
     return
 
 
-def t_ELLIPSIS(t):
-    r'\.\.\.'
-    t.value = S_ELLIPSIS
+def t_PATCH(t):
+    r'PATCH'
+    # HTTP method ``PATCH``
+    t.value = M_PATCH
     return t
 
 
-def t_PATCH(t):
-    r'PATCH'
-    t.value = M_PATCH
+def t_ELLIPSIS(t):
+    r'\.\.\.'
+    # Ellipsis: ``...``
+    t.value = S_ELLIPSIS
     return t
 
 
@@ -330,29 +259,37 @@ def t_STRING(t):
 
 def t_IDENTIFIER(t):
     r'[a-zA-Z_][a-zA-Z0-9_]*'
+    # Identifier, e.g. ``word``, ``word1``.
     return t
 
 
 def t_STATIC_ROUTE(t):
     r'\B/[^<{\r\n\s]*'
+    # Static route, e.g.:``/``, ``/order/``
     return t
 
 
 def t_STATUS_CODE_MATCHER(t):
     r'[0-9]+[X]+'
+    # Status code matcher, e.g.: ``4XX``
     return t
 
 
 def t_LITERAL_INTEGER(t):
     r'[+-]?[0-9]+'
+    # Integer literal, e.g.: ``404``, ``200``, ``201``
     t.value = int(t.value)
     return t
 
 
 def t_LITERAL_STRING(t):
     r'(\"([^\\\n]|(\\.))*?\")'
-    s = t.value[1:-1]
-    maps = {
+    # String literal, e.g.: ``"string"``
+    s = t.value[1:-1]  # Get content inside ``""``
+    # Translate escaping chars.
+    # Cause: original chars are actually two, e.g. ``"\\t"``,
+    # we are going to translate them into a single char ``"\t"``.
+    maps = {  # Escaping char we support
         't': '\t',
         'r': '\r',
         'n': '\n',
@@ -363,14 +300,14 @@ def t_LITERAL_STRING(t):
     length = len(s)
     val = ''
     while i < length:
-        if s[i] == '\\':
+        if s[i] == '\\':  # Escaping leader char
             i += 1
             if s[i] in maps:
                 val += maps[s[i]]
             else:
-                raise _InternalLexerError('unsupported escaping char %r at '
-                                          'line %d' % (s[i], t.lineno))
-        else:
+                raise _InternalLexerError("unsupported escaping char '{0}' at "
+                                          "{1}".format(s[i], t.lineno))
+        else:  # Non-escaping/normal char
             val += s[i]
         i += 1
     t.value = val
@@ -381,7 +318,116 @@ def t_LITERAL_STRING(t):
 # Parser
 ###
 
+class Schema(object):
+    """Full schema parse result.
+
+    :param request: The parsed :class:`Request <Request>`.
+    :param responses: The list of parsed :class:`Response <Response>`.
+    """
+
+    def __init__(self, request, responses):
+        self.request = request
+        self.responses = responses
+
+
+class Request(object):
+    """The request parse result.
+
+    :param methods: The list of parsed http method codes.
+    :param route: The parsed :class:`Route <Route>`.
+    :param json_schema: (optional) The parsed :class:`JsonSchema <JsonSchema>`.
+    """
+    def __init__(self, methods, route, json_schema=None):
+        self.methods = methods
+        self.route = route
+        self.json_schema = json_schema
+
+    @property
+    def methods_repr(self):
+        return '/'.join(self.methods)
+
+    def __repr__(self):
+        return '<Request [{0} {1}]>'.format(self.methods_repr, self.route.rule)
+
+
+class Response(object):
+    """The response parse result.
+
+    :param status_codes: The list of parsed status codes and status code
+       matchers.
+    :param json_schema: (optional) The parsed :class:`JsonSchema <JsonSchema>`.
+    """
+    def __init__(self, status_codes, json_schema=None):
+        self.status_codes = status_codes
+        self.json_schema = json_schema
+
+    @property
+    def status_codes_repr(self):
+        return '/'.join(map(str, self.status_codes))
+
+    def __repr__(self):
+        return '<Response [{0}]>'.format(self.status_codes_repr)
+
+
+class Route(object):
+    """The route parse result.
+    """
+    def __init__(self):
+        # The string route rule. e.g.: ``'/order/<i32>'``
+        self.rule = None
+        # Optional dictionary of url variable name to type pairs.
+        # e.g.: ``{'id': <I32, required>}``
+        self.url_variables = None
+        # Optional dictionary of url parameters name to type pairs.
+        self.url_parameters = None
+
+    def __repr__(self):
+        return '<Route [{0}]>'.format(self.rule)
+
+    def add_url_variable(self, static_rule, name=None, typ=None):
+        """Add an `url_variable` item to this route object.
+        This method should not be called from user code, it's made for parsing.
+
+        :param static_rule: The static route rule string.
+        :param name: A string represents the url variable name.
+        :param typ: The parsed :class:`Type <Type>` of this url variable.
+        """
+        # Reconstruct ``self.rule``.
+        rule = static_rule
+        if name:
+            if typ:
+                rule += '<{0}:{1}>'.format(typ, name)
+            else:
+                rule += '<{0}>'.format(name)
+        self.rule = rule
+        # Add ``name:typ`` to ``self.url_variables``.
+        if name:
+            if self.url_variables is None:
+                self.url_variables = {}
+            self.url_variables[name] = typ
+
+    def add_url_parameter(self, name, typ):
+        """Add an `url_parameter` item to this route object.
+        This method should not be called from user code, it's made for parsing.
+
+        :param name: The url parameter name.
+        :param typ: The parsed :class:`Type <Type>` of this url parameter.
+        """
+        if self.url_parameters is None:
+            self.url_parameters = {}
+        self.url_parameters[name] = typ
+
+
 def _parse_seq(p):
+    """Util function to parse recursive sequence::
+
+        def p_seq(p):
+            '''seq : item seq
+                   | item
+                   |'''
+            _parse_seq(p)
+
+    """
     if len(p) == 4:
         p[0] = [p[1]] + p[3]
     elif len(p) == 3:
@@ -394,23 +440,23 @@ def _parse_seq(p):
 
 def p_error(p):
     if p is None:
-        raise _InternalGrammarError('grammar error at EOF')
-    raise _InternalGrammarError('grammar error %r at line %d' % (p.value,
-                                                                 p.lineno))
+        raise _InternalGrammarError("grammar error at EOF")
+    raise _InternalGrammarError("grammar error '{0}' at line {1}".format(
+        p.value, p.lineno))
 
 
 def p_start(p):
     '''start : request response_seq'''
-    p[0] = dict(request=p[1], responses=p[2])
+    p[0] = Schema(p[1], p[2])
 
 
 def p_request(p):
     '''request : method_seq route json_schema
                | method_seq route'''
-    if len(p) == 4:
-        p[0] = dict(methods=p[1], route=p[2], schema=p[3])
-    elif len(p) == 3:
-        p[0] = dict(methods=p[1], route=p[2], schema=None)
+    if len(p) == 4:  # With json schema
+        p[0] = Request(p[1], p[2], p[3])
+    elif len(p) == 3:  # No json schema
+        p[0] = Request(p[1], p[2])
 
 
 def p_method_seq(p):
@@ -432,524 +478,93 @@ def p_method(p):
 
 
 def p_route(p):
-    '''route : route route_item
+    '''route : route route_item url_parameters
+             | route route_item
              |'''
-    if len(p) == 3:
+    if len(p) == 1:
+        p[0] = Route()
+    else:
+        route = p[1]
+        static_rule = p[2][0]
         if p[2][1]:
-            dct = dict(list(p[1][1].items()) + [p[2][1]])
-            p[0] = [p[1][0] + p[2][0] + '<' + p[2][1][0] + '>', dct]
+            url_variable_name, url_variable_type = p[2][1]
         else:
-            p[0] = [p[1][0] + p[2][0], p[1][1]]
-    elif len(p) == 1:
-        p[0] = ['', {}]
+            url_variable_name, url_variable_type = None, None
+        # Add url variable
+        route.add_url_variable(static_rule, url_variable_name,
+                               url_variable_type)
+        if len(p) == 4:
+            # Add url parameters
+            for url_parameter_name, url_parameter_type in p[3]:
+                route.add_url_parameter(url_parameter_name, url_parameter_type)
+        p[0] = route
 
 
 def p_route_item(p):
-    '''route_item : STATIC_ROUTE route_var
+    '''route_item : STATIC_ROUTE url_variable
                   | STATIC_ROUTE'''
+    # Returns a tuple in form of ``(static, url_variable)``.
+    # Where ``url_variable`` is optional, default ``None``.
     if len(p) == 3:
-        p[0] = [p[1], p[2]]
+        p[0] = (p[1], p[2])
     elif len(p) == 2:
-        p[0] = [p[1], None]
+        p[0] = (p[1], None)
 
 
-def p_route_var(p):
-    '''route_var : '<' type ':' IDENTIFIER '>'
-                 | '<' IDENTIFIER '>' '''
+def p_url_variable(p):
+    '''url_variable : '<' type ':' IDENTIFIER '>'
+                    | '<' IDENTIFIER '>' '''
+    # Returns a tuple in form of ``(name, type)``.
+    # Where ``type`` is optional, default ``None``.
     if len(p) == 6:
         p[0] = (p[4], p[2])
     elif len(p) == 4:
         p[0] = (p[2], None)
 
 
+def p_url_parameters(p):
+    '''url_parameters : '?' url_parameter_seq '''
+    p[0] = p[2]
+
+
+def p_url_parameter_seq(p):
+    '''url_parameter_seq : url_parameter_item '&' url_parameter_seq
+                         | url_parameter_item
+                         |'''
+    _parse_seq(p)
+
+
+def p_url_parameter_item(p):
+    '''url_parameter_item : IDENTIFIER '=' type '''
+    # Returns a tuple in form of ``(name, type)``.
+    p[0] = (p[1], [3])
+
+
 def p_response_seq(p):
     '''response_seq : response_item response_seq
-                    |'''
-    if len(p) == 3:
-        p[0] = [p[1]] + p[2]
-    elif len(p) == 1:
-        p[0] = []
+                    | response_item'''
+    # Returns list of :class:`Response <Response>`.
+    # A schema must have at least one response.
+    _parse_seq(p)
 
 
 def p_response_item(p):
     '''response_item : status_code_seq json_schema
                      | status_code_seq'''
     if len(p) == 3:
-        p[0] = dict(status_code=p[1], schema=p[2])
+        p[0] = Response(p[1], p[2])
     elif len(p) == 2:
-        p[0] = dict(status_code=p[1], schema=None)
+        p[0] = Response(p[1])
 
 
 def p_status_code_seq(p):
     '''status_code_seq : status_code_item '/' status_code_seq
-                       | status_code_item
-                       |'''
+                       | status_code_item'''
+    # A response must have at least one status code.
     _parse_seq(p)
 
 
 def p_status_code_item(p):
-    '''status_code_item : LITERAL_INTEGER
-                        | STATUS_CODE_MATCHER'''
+    '''status_code_item : STATUS_CODE_MATCHER
+                        | LITERAL_INTEGER'''
     p[0] = p[1]
-
-
-def p_json_schema(p):
-    '''json_schema : object
-                   | array '''
-    p[0] = p[1]
-
-
-def p_object(p):
-    '''object : '{' kv_seq '}'
-              | '{' kv_seq ELLIPSIS '}' '''
-    dct = dict(p[2])
-    if len(p) == 5:
-        dct[S_ELLIPSIS] = None
-    p[0] = dct
-
-
-def p_kv_seq(p):
-    '''kv_seq : kv ',' kv_seq
-              | kv kv_seq
-              |'''
-    _parse_seq(p)
-
-
-def p_kv(p):
-    '''kv : LITERAL_STRING ':' value'''
-    p[0] = (p[1], p[3])
-
-
-def p_array(p):
-    '''array : '[' value_seq ']'
-             | '[' value_seq ELLIPSIS ']' '''
-    if len(p) == 4:
-        p[0] = p[2]
-    elif len(p) == 5:
-        p[0] = p[2] + [p[3]]
-
-
-def p_value_seq(p):
-    '''value_seq : value ',' value_seq
-                 | value value_seq
-                 |'''
-    _parse_seq(p)
-
-
-def p_value(p):
-    '''value : type
-             | json_schema
-             | type '*'
-             | json_schema '*' '''
-    if len(p) == 3:
-        p[0] = (p[1], True)
-    elif len(p) == 2:
-        p[0] = (p[1], False)
-
-
-def p_type(p):
-    '''type : BOOL
-            | U8
-            | U16
-            | U32
-            | U64
-            | I8
-            | I16
-            | I32
-            | I64
-            | FLOAT
-            | string_type'''
-    p[0] = p[1]
-
-
-def p_string_type(p):
-    '''string_type : STRING
-                   | STRING '(' LITERAL_INTEGER ')' '''
-    if len(p) == 2:
-        p[0] = (T_STRING, None)
-    elif len(p) == 5:
-        p[0] = (T_STRING, p[3])
-
-
-def parse_schema(data):
-    """Parse schema string to schema dict.
-    """
-    # Rebuild `lexer` and `parser` each time.
-    lexer = lex.lex()
-    parser = yacc.yacc(debug=False, write_tables=0)
-
-    lexer.lineno = 1
-    return parser.parse(data)
-
-
-def parse(data):
-    """Parse docstring to schema dict.
-    Returns ``None`` if:
-        1. ``data`` is ``None`` or falsely.
-        2. No schema sign found in ``data``.
-    """
-    if not data:
-        return None
-    block_start = False
-    lines = []
-    ident = None
-    for line in data.splitlines():
-        if not block_start:
-            if 'Schema::' in line or \
-                    'Schema:' in line:
-                block_start = True
-            continue
-        if not line or line.isspace():
-            continue  # skip space or empty lines
-        _ident = len(line) - len(line.lstrip())
-        if ident is None:
-            ident = _ident
-            lines.append(line)
-        else:
-            if ident <= _ident:
-                lines.append(line)
-            else:
-                break
-    if block_start:
-        return parse_schema('\n'.join(lines))
-    return None
-
-
-def parse_from_func(func):
-    """Parse schema from function by parsing its ``__doc__``.
-    Returns ``None`` if given func has no ``__doc__``.
-    """
-    data = getattr(func, '__doc__', None)
-    if data is None:
-        return None
-    try:
-        return parse(data)
-    except _InternalError as exc:
-        func_code = get_func_code(func)
-        msg = '{}:{}:{}: {}'.format(func_code.co_filename,
-                                    func_code.co_firstlineno,
-                                    func_code.co_name,
-                                    str(exc))
-        if isinstance(exc, _InternalLexerError):
-            raise LexerError(msg)
-        elif isinstance(exc, _InternalGrammarError):
-            raise GrammarError(msg)
-        else:
-            raise ParserError(msg)
-
-
-###
-# Validation
-###
-
-P_REQUEST = 1
-P_RESPONSE = 2
-
-
-def raise_validation_error(errtyp, value, p, key=None):
-    if p == P_REQUEST:
-        cls = RequestValidationError
-    elif p == P_RESPONSE:
-        cls = ResponseValidationError
-    else:
-        cls = ValidationError
-    code, reason = errtyp
-    raise cls(code=code, reason=reason, value=value, key=key)
-
-
-def validate_bool(val, p, key=None):
-    if isinstance(val, bool):
-        return
-    raise_validation_error(ErrInvalidBool, val, p, key=key)
-
-
-def validate_u8(val, p, key=None):
-    if isinstance(val, int) and ctypes.c_uint8(val).value == val:
-        return
-    raise_validation_error(ErrInvalidU8, val, p, key=key)
-
-
-def validate_u16(val, p, key=None):
-    if isinstance(val, int) and ctypes.c_uint16(val).value == val:
-        return
-    raise_validation_error(ErrInvalidU16, val, p, key=key)
-
-
-def validate_u32(val, p, key=None):
-    if isinstance(val, int) and ctypes.c_uint32(val).value == val:
-        return
-    raise_validation_error(ErrInvalidU32, val, p, key=key)
-
-
-def validate_u64(val, p, key=None):
-    if isinstance(val, (int, long)) and ctypes.c_uint64(val).value == val:
-        return
-    raise_validation_error(ErrInvalidU64, val, p, key=key)
-
-
-def validate_i8(val, p, key=None):
-    if isinstance(val, int) and ctypes.c_int8(val).value == val:
-        return
-    raise_validation_error(ErrInvalidI8, val, p, key=key)
-
-
-def validate_i16(val, p, key=None):
-    if isinstance(val, int) and ctypes.c_int16(val).value == val:
-        return
-    raise_validation_error(ErrInvalidI16, val, p, key=key)
-
-
-def validate_i32(val, p, key=None):
-    if isinstance(val, int) and ctypes.c_int32(val).value == val:
-        return
-    raise_validation_error(ErrInvalidI32, val, p, key=key)
-
-
-def validate_i64(val, p, key=None):
-    if isinstance(val, (int, long)) and ctypes.c_int64(val).value == val:
-        return
-    raise_validation_error(ErrInvalidI64, val, p, key=key)
-
-
-def validate_float(val, p, key=None):
-    if isinstance(val, (int, long, float)):
-        return
-    raise_validation_error(ErrInvalidFloat, val, p, key=key)
-
-
-def validate_string(val, typ, p, key=None):
-    if isinstance(val, basestring):
-        if typ[1] is None or len(val) <= typ[1]:
-            return
-    raise_validation_error(ErrInvalidString, val, p, key=key)
-
-
-def validate_type(val, typ, p, key=None):
-    if typ == T_BOOL:
-        return validate_bool(val, p, key=key)
-    elif typ == T_U8:
-        return validate_u8(val, p, key=key)
-    elif typ == T_U16:
-        return validate_u16(val, p, key=key)
-    elif typ == T_U32:
-        return validate_u32(val, p, key=key)
-    elif typ == T_U64:
-        return validate_u64(val, p, key=key)
-    elif typ == T_I8:
-        return validate_i8(val, p, key=key)
-    elif typ == T_I16:
-        return validate_i16(val, p, key=key)
-    elif typ == T_I32:
-        return validate_i32(val, p, key=key)
-    elif typ == T_I64:
-        return validate_i64(val, p, key=key)
-    elif typ == T_FLOAT:
-        return validate_float(val, p, key=key)
-    elif isinstance(typ, tuple) and typ[0] == T_STRING:
-        return validate_string(val, typ, p, key=key)
-
-
-def validate_array(val, typ, p, key=None):
-    if not isinstance(val, list):
-        raise_validation_error(ErrNotArray, val, p, key=key)
-    if not typ:
-        if val:  # Must be empty array
-            raise_validation_error(ErrShouldBeEmptyArray, val, p, key=key)
-        return
-    if typ[0] == S_ELLIPSIS:
-        return
-    for i in range(len(typ)):
-        ityp = typ[i]
-        if i < len(typ)-1 and typ[i+1] == S_ELLIPSIS:
-            while i < len(val):
-                ival = val[i]
-                i += 1
-                validate_value(ival, ityp, p, key='{0}[{1}]'.format(key, i))
-            return None
-        else:
-            if i >= len(val):
-                raise_validation_error(ErrArrayElementsNotEnough, val, p,
-                                       key=key)
-            ival = val[i]
-            validate_value(ival, ityp, p, key='{0}[{1}]'.format(key, i))
-    if len(typ) != len(val):  # No ELLIPSIS
-        raise_validation_error(ErrArrayLength, val, p, key=key)
-
-
-def validate_object(val, typ, p, key=None):
-    if not isinstance(val, dict):
-        raise_validation_error(ErrNotObject, val, p, key=key)
-    for ikey, ityp in typ.items():
-        if ikey == S_ELLIPSIS:
-            continue
-        if ikey not in val:
-            _, nullable = ityp
-            if nullable:
-                continue
-            errtyp = ErrObjectKeyNotFound[0], \
-                "key {} not found in object".format(ikey)
-            raise_validation_error(errtyp, val, p,
-                                   key='{0}.{1}'.format(key, ikey))
-        ival = val[ikey]
-        validate_value(ival, ityp, p, key='{0}.{1}'.format(key, ikey))
-    if S_ELLIPSIS not in typ:
-        for ikey in val:
-            if ikey not in typ:
-                errtyp = ErrObjectUnexpectedKey[0], \
-                    "unexpected key {} in object".format(ikey)
-                raise_validation_error(errtyp, val, p,
-                                       key='{0}.{1}'.format(key, ikey))
-
-
-def validate_value(val, typ, p, key=None):  # Main entry
-    ityp, nullable = typ
-    if val is None:
-        if not nullable:
-            raise_validation_error(ErrNullable, val, p, key=key)
-        return
-    if isinstance(ityp, dict):
-        validate_object(val, ityp, p, key=key)
-    elif isinstance(ityp, list):
-        validate_array(val, ityp, p, key=key)
-    else:
-        validate_type(val, ityp, p, key=key)
-
-
-def validate_json(val, typ, p, key=None):
-    if typ is None:
-        if val is not None:
-            raise_validation_error(ErrShouldBeNull, val, p, key=key)
-        return
-    if isinstance(typ, (list, dict)):
-        ityp = (typ, False)  # top json mustn't be null
-        return validate_value(val, ityp, p, key=key)
-    raise_validation_error(ErrInvalidJSON, val, p, key=key)
-
-
-def validate_method(val, typ, p):
-    if val == 'POST' and M_POST in typ:
-        return
-    elif val == 'GET' and M_GET in typ:
-        return
-    elif val == 'PUT' and M_PUT in typ:
-        return
-    elif val == 'DELETE' and M_DELETE in typ:
-        return
-    elif val == 'PATCH' and M_PATCH in typ:
-        return
-    elif val == 'HEAD' and M_HEAD in typ:
-        return
-    elif val == 'OPTIONS' and M_OPTIONS in typ:
-        return
-    raise_validation_error(ErrInvalidMethod, val, p)
-
-
-def validate_route(val, typ, p):
-    args_typ = typ[1]
-    for key, ityp in args_typ.items():
-        if key not in val:
-            errtyp = ErrRouteVarNotFound[0], \
-                'route variable {} not found in route args'.format(key)
-            raise_validation_error(errtyp, val, p)
-        ival = val[key]
-        validate_type(ival, ityp, p)
-
-
-def validate_request(typ):
-    validate_method(request.method, typ['methods'], P_REQUEST)
-    validate_route(request.view_args, typ['route'], P_REQUEST)
-    validate_json(request.get_json(), typ['schema'], P_REQUEST, key='')
-
-
-def match_status_code(matcher, code):
-    code_s = str(code)
-    matcher_s = str(matcher)
-    if len(code_s) != len(matcher_s):
-        return False
-    for i, ch in enumerate(code_s):
-        if matcher_s[i] == ch or matcher_s[i] == 'X':
-            continue
-        else:
-            return False
-    return True
-
-
-def validate_response(val, typ):
-    p = P_RESPONSE
-    if isinstance(val, basestring):
-        status_code = 200
-        data = val
-    elif isinstance(val, Response):
-        status_code = val.status_code
-        data = val.get_data()
-    elif isinstance(val, (tuple, list)):
-        data = val[0]
-        status_code = val[1]
-    else:
-        raise_validation_error(ErrInvalidResponse, val, p)
-    if data:
-        try:
-            response_json = json.loads(str(data, 'utf8'))
-        except ValueError:
-            raise_validation_error(ErrInvalidResponse, val, p)
-    else:
-        response_json = None
-    for response_typ in typ:
-        code_matchers = response_typ['status_code']
-        json_typ = response_typ['schema']
-        for code_matcher in code_matchers:
-            if match_status_code(code_matcher, status_code):
-                if json_typ is None:
-                    if response_json is None:
-                        return
-                    if response_json == '':
-                        return  # Enable empty string''  # noqa
-                elif json_typ is not None and response_json is not None:
-                    return validate_json(response_json, json_typ, p,
-                                         key='')
-    raise_validation_error(ErrInvalidResponse, val, p)
-
-
-def validate(func):
-    """A decorator that is used to validate request and response for given
-    api function, example::
-
-        @app.route('/user/<id>', methods=['GET'])
-        @validate
-        def get_user(id):
-            '''Schema::
-
-                GET /user/<i32:id>
-
-                200
-                {
-                    "id": i32,
-                    "name": string(32)
-                }
-            '''
-            pass
-    """
-    schema = parse_from_func(func)
-    if schema is None:
-        return func
-
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        validate_request(schema['request'])
-        response = func(*args, **kwargs)
-        validate_response(response, schema['responses'])
-        return response
-    return wrapper
-
-
-def register_all(app):
-    """Register all view functions for given flask app, example::
-
-        app = Flask(__name__)
-        from .views import *
-        register_all(app)
-    """
-    for endpoint, view_func in app.view_functions.items():
-        if endpoint == 'static':
-            continue
-        app.view_functions[endpoint] = validate(view_func)

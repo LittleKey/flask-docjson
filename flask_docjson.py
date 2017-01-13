@@ -13,6 +13,11 @@
 import sys
 import threading
 
+from ply import lex, yacc
+
+
+__version__ = '0.2.0'
+
 
 ###
 # Exceptions
@@ -45,11 +50,15 @@ class _InternalError(Exception):
     """
 
 
-class _InternalLexerError(_InternalError):
+class _InternalParseError(_InternalError):
+    """An internal parse error occurred."""
+
+
+class _InternalLexerError(_InternalParseError):
     """An internal lexer error occurred."""
 
 
-class _InternalGrammarError(_InternalGrammarError):
+class _InternalGrammarError(_InternalParseError):
     """An internal parser error occurred."""
 
 
@@ -69,6 +78,8 @@ def get_func_code(func):
 # Globals
 ###
 
+# Signs
+S_SCHEMA = 'Schema::'
 S_ELLIPSIS = 0  # Ellipsis is ``...``
 
 # Base types
@@ -85,14 +96,13 @@ T_FLOAT = 10
 T_STRING = 11
 
 # HTTP methods
-M_POST = 1
-M_GET = 2
-M_PUT = 3
-M_DELETE = 4
-M_PATCH = 5
-M_HEAD = 6
-M_OPTIONS = 7
-
+M_POST = 'POST'
+M_GET = 'GET'
+M_PUT = 'PUT'
+M_DELETE = 'DELETE'
+M_PATCH = 'PATCH'
+M_HEAD = 'HEAD'
+M_OPTIONS = 'OPTIONS'
 
 ###
 # Lexer
@@ -356,7 +366,7 @@ class Request(object):
 
     :param methods: The list of parsed http method codes.
     :param route: The parsed :class:`Route <Route>`.
-    :param json_schema: (optional) The parsed :class:`JsonSchema <JsonSchema>`.
+    :param json_schema: (optional) The parsed :class:`JSONSchema <JSONSchema>`.
     """
     def __init__(self, methods, route, json_schema=None):
         self.methods = methods
@@ -376,7 +386,7 @@ class Response(object):
 
     :param status_codes: The list of parsed status codes and status code
        matchers.
-    :param json_schema: (optional) The parsed :class:`JsonSchema <JsonSchema>`.
+    :param json_schema: (optional) The parsed :class:`JSONSchema <JSONSchema>`.
     """
     def __init__(self, status_codes, json_schema=None):
         self.status_codes = status_codes
@@ -439,7 +449,7 @@ class Route(object):
         self.url_parameters[name] = typ
 
 
-class JsonSchema(object):
+class JSONSchema(object):
     """The json_schema parse result.
 
     :param data: The original json schema data.
@@ -460,6 +470,12 @@ class JsonSchema(object):
         """
         return isinstance(self.data, dict)
 
+    def __repr__(self):
+        if self.is_object():
+            return '<JSONSchema [object]>'
+        elif self.is_array():
+            return '<JSONSchema [array]>'
+
 
 class Type(object):
     """The type parse result.
@@ -468,16 +484,42 @@ class Type(object):
     :param required: A boolean value indicates whether value can be optional or
        ``None``, defaults to ``True``.
     """
-    def __init__(self, base, required=True, is_ref_type=False):
-        if isinstance(base, Type):
-            # Flat ``base`` if it's a ``Type``.
-            self.base = base.base
-        else:
-            self.base = base
+    def __init__(self, base, required=True, ref_type=False):
+        self.base = base
         self.required = required
-        self.is_ref_type = is_ref_type
-        # The original type of a ref_type if `is_ref_type` is set.
+        self.ref_type = ref_type
+        # The original type of a ref_type if `ref_type` is set.
         self.orig_type = None
+
+    def is_bool(self):
+        return self.base == T_BOOL
+
+    def is_u8(self):
+        return self.base == T_U8
+
+    def is_u16(self):
+        return self.base == T_U16
+
+    def is_u32(self):
+        return self.base == T_U32
+
+    def is_u64(self):
+        return self.base == T_U64
+
+    def is_i8(self):
+        return self.base == T_I8
+
+    def is_i16(self):
+        return self.base == T_I16
+
+    def is_i32(self):
+        return self.base == T_I32
+
+    def is_i64(self):
+        return self.base == T_I64
+
+    def is_float(self):
+        return self.base == T_FLOAT
 
     def is_string(self):
         """Returns ``True`` if this type is a string type.
@@ -512,6 +554,72 @@ class Type(object):
             return True
         return False
 
+    def is_json_schema_type(self):
+        """Returns ``True`` if this type is a json_schema type.
+        """
+        return isinstance(self.base, JSONSchema)
+
+    def is_ref_type(self):
+        """Returns ``True`` if this type is a ref_type.
+        """
+        return self.ref_type
+
+    def __repr__(self):
+        if self.is_bool():
+            return 'bool'
+        elif self.is_u8():
+            return 'u8'
+        elif self.is_u16():
+            return 'u16'
+        elif self.is_u32():
+            return 'u32'
+        elif self.is_u64():
+            return 'u64'
+        elif self.is_i8():
+            return 'i8'
+        elif self.is_i16():
+            return 'i16'
+        elif self.is_i32():
+            return 'i32'
+        elif self.is_i64():
+            return 'i64'
+        elif self.is_float():
+            return 'float'
+        elif self.is_string():
+            return 'string({})'.format(self.base[1])
+        elif self.is_ref_type():
+            return self.base
+        return repr(self.base)
+
+
+def make_type(base, required=None, ref_type=None):
+    """Constructs an instance of :class:`Type <Type>`. Returns ``base`` itself
+    if it's already a type instance.
+
+    :param base: The base type or type related data to build :class:`Type
+       <Type>`.
+    :param required: A boolean value defaults to ``None``. When sets to
+       ``None``, original ``base.required`` would be kept without changes (when
+       ``base`` is a type the same time).
+    :param ref_type: A boolean value defaults to ``None``. When sets to
+       ``None``, original ``base.ref_type`` would be kept without changes (when
+       ``base`` is a type the same time).
+    """
+    if isinstance(base, Type):
+        if required is not None:
+            base.required = required
+        if ref_type is not None:
+            base.ref_type = ref_type
+        return base
+    # Do not set keyword arguments if given argument is ``None``.
+    # This keeps the default values for ``Type.__init__`` works.
+    kwargs = {}
+    if required is not None:
+        kwargs['required'] = required
+    if ref_type is not None:
+        kwargs['ref_type'] = ref_type
+    return Type(base, **kwargs)
+
 
 class TypeReference(object):
     """Reference abstraction for ref_type, used to hold the reference context
@@ -526,6 +634,13 @@ class TypeReference(object):
         self.typ = typ
         self.lineno = lineno
         self.func = func
+
+    def __repr__(self):
+        if self.typ.orig_type:
+            return "<Reference [{0} of {1}]>".format(self.name,
+                                                     self.typ.orig_type)
+        else:
+            return "<Reference [{0}]>".format(self.name)
 
 
 class ParseContext(threading.local):
@@ -591,28 +706,31 @@ class ParseContext(threading.local):
 _parse_ctx = ParseContext()
 
 
-def raise_parse_error(func, exc):
+def raise_parse_error(exc, func=None):
     """Format parse exception ``exc`` with flask view function ``func`` and
     raise it.
 
     :param func: A flask view function.
     :param exc: An internal parse exception, instance of
-       :class:`_InternalLexerError <_InternalLexerError>`,
-       or :class:`_InternalGrammarError <_InternalGrammarError>`,
-       or :class:`_InternalError <_InternalError>`.
+       :exc:`~flask_docjson._InternalLexerError`,
+       or :exc:`~flask_docjson._InternalGrammarError`,
+       or :exc:`~flask_docjson._InternalParseError`.
     """
-    func_code = get_func_code(func)
-    msg = ('An error occurred on function {0} (defined at {1}:{2}), original '
-           'exception on its schema definition is:{3}')\
-        .format(func_code.co_name,
-                func_code.co_filename,
-                func_code.co_firstlineno,
-                exc)
+    if func:
+        func_code = get_func_code(func)
+        msg = ('An error occurred on function {0} (defined at {1}:{2}), original '
+               'exception on its schema definition is:{3}')\
+            .format(func_code.co_name,
+                    func_code.co_filename,
+                    func_code.co_firstlineno,
+                    exc)
+    else:
+        msg = str(exc)
     if isinstance(exc, _InternalLexerError):
         raise LexerError(msg)
     elif isinstance(exc, _InternalGrammarError):
         raise GrammarError(msg)
-    else:
+    elif isinstance(exc, _InternalParseError):
         raise ParserError(msg)
 
 
@@ -649,7 +767,7 @@ def p_start(p):
 
 
 def p_request(p):
-    '''request : method_seq route json_schema
+    '''request : method_seq route json_value
                | method_seq route'''
     if len(p) == 4:  # With json schema
         p[0] = Request(p[1], p[2], p[3])
@@ -748,7 +866,7 @@ def p_response_seq(p):
 
 
 def p_response_item(p):
-    '''response_item : status_code_seq json_schema
+    '''response_item : status_code_seq json_value
                      | status_code_seq'''
     if len(p) == 3:
         p[0] = Response(p[1], p[2])
@@ -778,13 +896,13 @@ def p_json_schema(p):
 def p_json_object(p):
     '''json_object : '{' json_kv_seq '}'
                    | '{' json_kv_seq ELLIPSIS '}' '''
-    p[0] = JsonSchema(dict(p[2]), has_ellipsis=(len(p) == 5))
+    p[0] = JSONSchema(dict(p[2]), has_ellipsis=(len(p) == 5))
 
 
 def p_json_array(p):
     '''json_array : '[' json_value_seq ']'
                   | '[' json_value_seq ELLIPSIS ']' '''
-    p[0] = JsonSchema(p[2], has_ellipsis=(len(p) == 5))
+    p[0] = JSONSchema(p[2], has_ellipsis=(len(p) == 5))
 
 
 def p_json_kv_seq(p):
@@ -828,13 +946,14 @@ def p_simple_type_as_ref(p):
 def p_ref_type_may_optional(p):
     '''ref_type_may_optional : ref_type
                              | ref_type '*' '''
-    p[0] = Type(p[1], reuired=(len(p) == 2))
+    p[0] = make_type(p[1], required=(len(p) == 2),
+                     ref_type=True)
 
 
 def p_ref_type(p):
     '''ref_type : IDENTIFIER'''
     # Generate a ``type`` for this ref_type
-    ref_typ = Type(p[1], is_ref_type=True)
+    ref_typ = make_type(p[1], ref_type=True)
     p[0] = ref_typ
     # Record this reference for later replacement.
     reference = TypeReference(p[1], ref_typ,
@@ -846,19 +965,19 @@ def p_ref_type(p):
 def p_simple_type_may_optional(p):
     '''simple_type_may_optional : simple_type
                                 | simple_type '*' '''
-    p[0] = Type(p[1], reuired=(len(p) == 2))
+    p[0] = make_type(p[1], required=(len(p) == 2))
 
 
 def p_simple_type(p):
     '''simple_type : base_type
                    | json_schema'''
-    p[0] = Type(p[1])
+    p[0] = make_type(p[1])
 
 
 def p_base_type_may_optional(p):
     '''base_type_may_optional : base_type
                               | base_type '*' '''
-    p[0] = Type(p[1], reuired=(len(p) == 2))
+    p[0] = make_type(p[1], required=(len(p) == 2))
 
 
 def p_base_type(p):
@@ -873,13 +992,81 @@ def p_base_type(p):
                  | I64
                  | FLOAT
                  | string_type'''
-    p[0] = Type([1])
+    p[0] = make_type(p[1])
 
 
 def p_string_type(p):
     '''string_type : STRING
                    | STRING '(' LITERAL_INTEGER ')' '''
     if len(p) == 2:
-        p[0] = Type((p[1], None))
+        p[0] = make_type((p[1], None))
     elif len(p) == 5:
-        p[0] = Type((p[1], p[3]))
+        p[0] = make_type((p[1], p[3]))
+
+
+def parse_schema(data):
+    """Parse a single schema from ``data``. The ``data`` is the part insides
+    the ``Schema::`` body.
+    Returns parsed result, instance of :class:`Schema <Schema>`.
+    """
+    # Rebuild ``lexer`` and ``parser`` for each parsing to avoid some strange
+    # errors, this is an unsolved issue.
+    lexer = lex.lex()
+    parser = yacc.yacc(debug=False, write_tables=0)
+    lexer.lineno = 1
+    return parser.parse(data)
+
+
+def parse_docstring(data):
+    """Parse function docstring (the ``data``) to :class:`Schema <Schema>`.
+
+    The example docstring should contain a leader sign ``Schema::``, for
+    an example::
+
+        Schema::
+
+            GET /order/<i32>
+            200
+            {"id": i64, "item": string}
+
+    * Returns ``None`` if given ``data`` is ``None``.
+    * Returns ``None`` if given ``data`` has no schema sign.
+    """
+    if data is None:
+        return None
+
+    sign_length = len(S_SCHEMA)
+    i = 0
+    block = ''
+
+    # Found leader sign
+    while i < len(data):
+        j = i + sign_length
+        if data[i:j] == S_SCHEMA:
+            i = j
+            break
+        i += 1
+    if i >= len(data):
+        return  # Not found
+
+    # Fill the block.
+    indent = 0
+    while i < len(data):
+        if data[i] == '\n':
+            indent = 0
+            block += data[i]
+        elif indent < 4:
+            if data[i] == ' ':
+                indent += 1
+            elif data[i] == '\t':
+                indent += 4
+            else:
+                break
+        else:
+            block += data[i]
+        i += 1
+
+    print(block)
+
+    if block:
+        return parse_schema(block)

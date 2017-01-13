@@ -10,6 +10,8 @@
     :license: BSD, see LICENSE for more details.
 """
 
+import threading
+
 
 ###
 # Exceptions
@@ -116,6 +118,7 @@ tokens = (
     'STATUS_CODE_MATCHER',
     'LITERAL_INTEGER',
     'LITERAL_STRING',
+    'AS',
 )
 
 
@@ -254,6 +257,11 @@ def t_FLOAT(t):
 def t_STRING(t):
     r'string'
     t.value = T_STRING
+    return t
+
+
+def t_AS(t):
+    r'as'
     return t
 
 
@@ -418,6 +426,109 @@ class Route(object):
         self.url_parameters[name] = typ
 
 
+class JsonSchema(object):
+    """The json_schema parse result.
+
+    :param data: The original json schema data.
+    :param has_ellipsis: A boolean value indicates whether there is
+       ``ELLIPSIS`` sign.
+    """
+    def __init__(self, data, has_ellipsis=False):
+        self.data = data
+        self.has_ellipsis = has_ellipsis
+
+    def is_array(self):
+        """Returns ``True`` if this json_schema is an array.
+        """
+        return isinstance(self.data, list)
+
+    def is_object(self):
+        """Returns ``True`` if this json_schema is an object.
+        """
+        return isinstance(self.data, dict)
+
+
+class Type(object):
+    """The type parse result.
+
+    :param base: The base type to construct the :class:`Type <Type>`.
+    :param required: A boolean value indicates whether value can be optional or
+       ``None``, defaults to ``True``.
+    """
+    def __init__(self, base, required=True):
+        if isinstance(base, Type):
+            # Flat ``base`` if it's a ``Type``.
+            self.base = base.base
+        else:
+            self.base = base
+        self.required = required
+
+    def is_string(self):
+        """Returns ``True`` if this type is a string type.
+        """
+        if isinstance(self.base, tuple):
+            if self.base[0] == T_STRING:
+                return True
+        return False
+
+    def get_string_length(self):
+        """Returns string length constraint value if this type is a string
+        type. Otherwise returns ``None``.
+        """
+        if self.is_string():
+            return self.base[1]
+
+    def is_base_type(self):
+        """Returns ``True`` if this type is a base type.
+        """
+        if self.base in (T_BOOL,
+                         T_U8,
+                         T_U16,
+                         T_U32,
+                         T_U64,
+                         T_I8,
+                         T_I16,
+                         T_I32,
+                         T_I64,
+                         T_FLOAT):
+            return True
+        if self.is_string():
+            return True
+        return False
+
+    def is_ref_type(self):
+        """Returns ``True`` if this type is a ref type.
+        """
+        return isinstance(self.base, str)
+
+
+class ParseContext(threading.local):
+    """Global parsing context to hold runtime data. This should not be used
+    from user code, it's made for parsing. Also global variables sucks, but
+    ply library requires that.
+
+    The constructed context is a threading local object to avoid unsafe
+    behaviors on multiple threading environments such as gunicorn workers. The
+    one thing only to ensure is that we should patch ``threading`` with gevent
+    before ``flask-docjson`` is loaded, if you are using gevent workers.
+
+    The lifetime of this context is from full flask app parsing start to end.
+    """
+    def __init__(self):
+        self.ref_type_map = {}
+
+    def register_ref_type(self, name, typ):
+        """Register a ref_type to the context.
+        """
+        if name in self.ref_type_map:
+            raise ParserError("Duplicate type reference: {0}".format(name))
+        self.ref_type_map[name] = typ
+
+
+# Global threading-local parse context.
+_parse_context = ParseContext()
+
+
 def _parse_seq(p):
     """Util function to parse recursive sequence::
 
@@ -512,10 +623,11 @@ def p_route_item(p):
 
 
 def p_url_variable(p):
-    '''url_variable : '<' type ':' IDENTIFIER '>'
+    '''url_variable : '<' base_type ':' IDENTIFIER '>'
                     | '<' IDENTIFIER '>' '''
     # Returns a tuple in form of ``(name, type)``.
     # Where ``type`` is optional, default ``None``.
+    # Note that ``type`` must be a required base type.
     if len(p) == 6:
         p[0] = (p[4], p[2])
     elif len(p) == 4:
@@ -535,7 +647,7 @@ def p_url_parameter_seq(p):
 
 
 def p_url_parameter_item(p):
-    '''url_parameter_item : IDENTIFIER '=' type '''
+    '''url_parameter_item : IDENTIFIER '=' base_type_may_optional '''
     # Returns a tuple in form of ``(name, type)``.
     p[0] = (p[1], [3])
 
@@ -568,3 +680,111 @@ def p_status_code_item(p):
     '''status_code_item : STATUS_CODE_MATCHER
                         | LITERAL_INTEGER'''
     p[0] = p[1]
+
+
+def p_json_schema(p):
+    '''json_schema : json_object
+                   | json_array '''
+    p[0] = p[1]
+
+
+def p_json_object(p):
+    '''json_object : '{' json_kv_seq '}'
+                   | '{' json_kv_seq ELLIPSIS '}' '''
+    p[0] = JsonSchema(dict(p[2]), has_ellipsis=(len(p) == 5))
+
+
+def p_json_array(p):
+    '''json_array : '[' json_value_seq ']'
+                  | '[' json_value_seq ELLIPSIS ']' '''
+    p[0] = JsonSchema(p[2], has_ellipsis=(len(p) == 5))
+
+
+def p_json_kv_seq(p):
+    '''json_kv_seq : json_kv_item ',' json_kv_seq
+                   | json_kv_item
+                   |'''
+    _parse_seq(p)
+
+
+def p_json_kv(p):
+    '''json_kv_item : LITERAL_STRING ':' json_value '''
+    p[0] = (p[1], p[3])
+
+
+def p_json_value_seq(p):
+    '''json_value_seq : json_value ',' json_value_seq
+                      | json_value
+                      |'''
+    _parse_seq(p)
+
+
+def p_json_value(p):
+    '''json_value : type
+                  | simple_type_as_ref'''
+    p[0] = p[1]
+
+
+def p_type(p):
+    '''type : simple_type_may_optional
+            | ref_type_may_optional'''
+    p[0] = p[1]
+
+
+def p_simple_type_as_ref(p):
+    '''simple_type_as_ref : simple_type_may_optional AS IDENTIFIER '''
+    p[0] = p[1]
+    _parse_context.register_ref_type(p[3], p[1])
+
+
+def p_ref_type_may_optional(p):
+    '''ref_type_may_optional : ref_type
+                             | ref_type '*' '''
+    p[0] = Type(p[1], reuired=(len(p) == 2))
+
+
+def p_ref_type(p):
+    '''ref_type : IDENTIFIER'''
+    p[0] = Type(p[1])  # FIXME
+
+
+def p_simple_type_may_optional(p):
+    '''simple_type_may_optional : simple_type
+                                | simple_type '*' '''
+    p[0] = Type(p[1], reuired=(len(p) == 2))
+
+
+def p_simple_type(p):
+    '''simple_type : base_type
+                   | json_schema'''
+    p[0] = Type(p[1])
+
+
+def p_base_type_may_optional(p):
+    '''base_type_may_optional : base_type
+                              | base_type '*' '''
+    p[0] = Type(p[1], reuired=(len(p) == 2))
+
+
+def p_base_type(p):
+    '''base_type : BOOL
+                 | U8
+                 | U16
+                 | U32
+                 | U64
+                 | I8
+                 | I16
+                 | I32
+                 | I64
+                 | FLOAT
+                 | string_type'''
+    p[0] = Type([1])
+
+
+def p_string_type(p):
+    '''string_type : STRING
+                   | STRING '(' LITERAL_INTEGER ')' '''
+    if len(p) == 2:
+        p[0] = Type((p[1], None))
+    elif len(p) == 5:
+        p[0] = Type((p[1], p[3]))

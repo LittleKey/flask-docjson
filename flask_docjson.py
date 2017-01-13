@@ -10,6 +10,7 @@
     :license: BSD, see LICENSE for more details.
 """
 
+import sys
 import threading
 
 
@@ -50,6 +51,18 @@ class _InternalLexerError(_InternalError):
 
 class _InternalGrammarError(_InternalGrammarError):
     """An internal parser error occurred."""
+
+
+###
+# Compact
+###
+
+def get_func_code(func):
+    """Returns the ``code`` object of given flask view ``func``.
+    """
+    if sys.version_info.major == 3:  # Py3
+        return func.__code__
+    return func.func_code  # Py2
 
 
 ###
@@ -455,13 +468,16 @@ class Type(object):
     :param required: A boolean value indicates whether value can be optional or
        ``None``, defaults to ``True``.
     """
-    def __init__(self, base, required=True):
+    def __init__(self, base, required=True, is_ref_type=False):
         if isinstance(base, Type):
             # Flat ``base`` if it's a ``Type``.
             self.base = base.base
         else:
             self.base = base
         self.required = required
+        self.is_ref_type = is_ref_type
+        # The original type of a ref_type if `is_ref_type` is set.
+        self.orig_type = None
 
     def is_string(self):
         """Returns ``True`` if this type is a string type.
@@ -496,10 +512,20 @@ class Type(object):
             return True
         return False
 
-    def is_ref_type(self):
-        """Returns ``True`` if this type is a ref type.
-        """
-        return isinstance(self.base, str)
+
+class TypeReference(object):
+    """Reference abstraction for ref_type, used to hold the reference context
+    such as ``lineno`` etc.
+
+    :param name: The type name of the reference.
+    :parm typ: The generated ``ref_type`` for this reference.
+    :param lineno: The line number where the reference locates.
+    """
+    def __init__(self, name, typ, lineno=None, func=None):
+        self.name = name
+        self.typ = typ
+        self.lineno = lineno
+        self.func = func
 
 
 class ParseContext(threading.local):
@@ -515,18 +541,79 @@ class ParseContext(threading.local):
     The lifetime of this context is from full flask app parsing start to end.
     """
     def __init__(self):
+        # A map of `name` to `type` for ref_type
         self.ref_type_map = {}
+        # A list of references for ref_type
+        self.references = []
+        # Current working on view_function.
+        self.current_func = None
 
-    def register_ref_type(self, name, typ):
+    def set_current_func(self, func):
+        """Set current parsing view function.
+        """
+        self.current_func = func
+
+    def register_ref_type(self, name, typ, lineno=None):
         """Register a ref_type to the context.
         """
         if name in self.ref_type_map:
-            raise ParserError("Duplicate type reference: {0}".format(name))
+            exc = _InternalGrammarError(
+                "Duplicated type reference definition: "
+                "'{0}' at line {1}".format(name, lineno))
+            raise_parse_error(self.current_func, exc)
         self.ref_type_map[name] = typ
+
+    def append_reference(self, reference):
+        """Record a type reference.
+        """
+        self.references.append(reference)
+
+    def resolve_references(self):
+        """Resolve all references to types, this will replace the ``ref_type``
+        with the referenced original type.
+
+        Raises :class:`GrammarError <GrammarError>` if any referenced type
+        is not found.
+
+        This should be called after all view functions are parsed.
+        """
+        for ref in self.references:
+            if ref.name not in self.ref_type_map:
+                exc = _InternalGrammarError(
+                    "Undefined type alias: "
+                    "'{0}' at line {1}".format(ref.name,
+                                               ref.lineno))
+                raise_parse_error(ref.func, exc)
+            ref.typ.orig_type = self.ref_type_map[ref.name]
 
 
 # Global threading-local parse context.
-_parse_context = ParseContext()
+_parse_ctx = ParseContext()
+
+
+def raise_parse_error(func, exc):
+    """Format parse exception ``exc`` with flask view function ``func`` and
+    raise it.
+
+    :param func: A flask view function.
+    :param exc: An internal parse exception, instance of
+       :class:`_InternalLexerError <_InternalLexerError>`,
+       or :class:`_InternalGrammarError <_InternalGrammarError>`,
+       or :class:`_InternalError <_InternalError>`.
+    """
+    func_code = get_func_code(func)
+    msg = ('An error occurred on function {0} (defined at {1}:{2}), original '
+           'exception on its schema definition is:{3}')\
+        .format(func_code.co_name,
+                func_code.co_filename,
+                func_code.co_firstlineno,
+                exc)
+    if isinstance(exc, _InternalLexerError):
+        raise LexerError(msg)
+    elif isinstance(exc, _InternalGrammarError):
+        raise GrammarError(msg)
+    else:
+        raise ParserError(msg)
 
 
 def _parse_seq(p):
@@ -734,7 +821,8 @@ def p_type(p):
 def p_simple_type_as_ref(p):
     '''simple_type_as_ref : simple_type_may_optional AS IDENTIFIER '''
     p[0] = p[1]
-    _parse_context.register_ref_type(p[3], p[1])
+    # Register referenced type
+    _parse_ctx.register_ref_type(p[3], p[1], p.lineno)
 
 
 def p_ref_type_may_optional(p):
@@ -745,7 +833,14 @@ def p_ref_type_may_optional(p):
 
 def p_ref_type(p):
     '''ref_type : IDENTIFIER'''
-    p[0] = Type(p[1])  # FIXME
+    # Generate a ``type`` for this ref_type
+    ref_typ = Type(p[1], is_ref_type=True)
+    p[0] = ref_typ
+    # Record this reference for later replacement.
+    reference = TypeReference(p[1], ref_typ,
+                              lineno=p.lineno,
+                              func=_parse_ctx.current_func)
+    _parse_ctx.append_reference(reference)
 
 
 def p_simple_type_may_optional(p):

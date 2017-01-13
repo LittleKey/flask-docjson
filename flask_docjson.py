@@ -295,7 +295,7 @@ def t_IDENTIFIER(t):
 
 
 def t_STATIC_ROUTE(t):
-    r'\B/[^<{\r\n\s]*'
+    r'\B/[^<{\r\n\s?]*'
     # Static route, e.g.:``/``, ``/order/``
     return t
 
@@ -366,12 +366,13 @@ class Request(object):
 
     :param methods: The list of parsed http method codes.
     :param route: The parsed :class:`Route <Route>`.
-    :param json_schema: (optional) The parsed :class:`JSONSchema <JSONSchema>`.
+    :param json_type: (optional) The parsed :class:`Type <Type>`
+       (type wrapper of :class:`JSONSchema <JSONSchema>` instance).
     """
-    def __init__(self, methods, route, json_schema=None):
+    def __init__(self, methods, route, json_type=None):
         self.methods = methods
         self.route = route
-        self.json_schema = json_schema
+        self.json_type = json_type
 
     @property
     def methods_repr(self):
@@ -386,11 +387,12 @@ class Response(object):
 
     :param status_codes: The list of parsed status codes and status code
        matchers.
-    :param json_schema: (optional) The parsed :class:`JSONSchema <JSONSchema>`.
+    :param json_type: (optional) The parsed :class:`Type <Type>`
+       (type wrapper of :class:`JSONSchema <JSONSchema>` instance).
     """
-    def __init__(self, status_codes, json_schema=None):
+    def __init__(self, status_codes, json_type=None):
         self.status_codes = status_codes
-        self.json_schema = json_schema
+        self.json_type = json_type
 
     @property
     def status_codes_repr(self):
@@ -430,7 +432,10 @@ class Route(object):
                 rule += '<{0}:{1}>'.format(typ, name)
             else:
                 rule += '<{0}>'.format(name)
-        self.rule = rule
+        if self.rule is None:
+            self.rule = rule
+        elif rule != '/':  # Right strip '/'
+            self.rule += rule
         # Add ``name:typ`` to ``self.url_variables``.
         if name:
             if self.url_variables is None:
@@ -589,7 +594,7 @@ class Type(object):
             return 'string({})'.format(self.base[1])
         elif self.is_ref_type():
             return self.base
-        return repr(self.base)
+        return '<Type [{0}]>'.format(self.base)
 
 
 def make_type(base, required=None, ref_type=None):
@@ -744,13 +749,13 @@ def _parse_seq(p):
             _parse_seq(p)
 
     """
-    if len(p) == 4:
+    if len(p) == 4:  # With separator
         p[0] = [p[1]] + p[3]
-    elif len(p) == 3:
+    elif len(p) == 3:  # Without separator
         p[0] = [p[1]] + p[2]
-    elif len(p) == 2:
+    elif len(p) == 2:  # Single item
         p[0] = [p[1]]
-    elif len(p) == 1:
+    elif len(p) == 1:  # Empty
         p[0] = []
 
 
@@ -767,7 +772,7 @@ def p_start(p):
 
 
 def p_request(p):
-    '''request : method_seq route json_value
+    '''request : method_seq route json_type
                | method_seq route'''
     if len(p) == 4:  # With json schema
         p[0] = Request(p[1], p[2], p[3])
@@ -854,7 +859,7 @@ def p_url_parameter_seq(p):
 def p_url_parameter_item(p):
     '''url_parameter_item : IDENTIFIER '=' base_type_may_optional '''
     # Returns a tuple in form of ``(name, type)``.
-    p[0] = (p[1], [3])
+    p[0] = (p[1], p[3])
 
 
 def p_response_seq(p):
@@ -866,7 +871,7 @@ def p_response_seq(p):
 
 
 def p_response_item(p):
-    '''response_item : status_code_seq json_value
+    '''response_item : status_code_seq json_type
                      | status_code_seq'''
     if len(p) == 3:
         p[0] = Response(p[1], p[2])
@@ -930,10 +935,24 @@ def p_json_value(p):
     p[0] = p[1]
 
 
+def p_json_type(p):
+    '''json_type : json_schema_may_optional
+                 | ref_type_may_optional
+                 | json_type_as_ref'''
+    p[0] = p[1]
+
+
 def p_type(p):
     '''type : simple_type_may_optional
             | ref_type_may_optional'''
     p[0] = p[1]
+
+
+def p_json_schema_as_ref(p):
+    '''json_type_as_ref : json_schema_may_optional AS IDENTIFIER'''
+    p[0] = p[1]
+    # Register referenced type
+    _parse_ctx.register_ref_type(p[3], p[1], p.lineno)
 
 
 def p_simple_type_as_ref(p):
@@ -972,6 +991,12 @@ def p_simple_type(p):
     '''simple_type : base_type
                    | json_schema'''
     p[0] = make_type(p[1])
+
+
+def p_json_schema_may_optional(p):
+    '''json_schema_may_optional : json_schema
+                                | json_schema '*' '''
+    p[0] = make_type(p[1], required=(len(p) == 2))
 
 
 def p_base_type_may_optional(p):

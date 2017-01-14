@@ -1029,20 +1029,29 @@ def p_string_type(p):
         p[0] = make_type((p[1], p[3]))
 
 
-def parse_schema(data):
+def parse_schema(data, resolve_references=False):
     """Parse a single schema from ``data``. The ``data`` is the part insides
     the ``Schema::`` body.
     Returns parsed result, instance of :class:`Schema <Schema>`.
+
+    :param data: The string schema block data to parse.
+    :param resolve_references: An optional boolean defaults to ``False``. When
+       set, references to types would be resloved right after the parse
+       finish. In normal case, the references would be resolved after all
+       schemas parsed.
     """
     # Rebuild ``lexer`` and ``parser`` for each parsing to avoid some strange
     # errors, this is an unsolved issue.
     lexer = lex.lex()
     parser = yacc.yacc(debug=False, write_tables=0)
     lexer.lineno = 1
-    return parser.parse(data)
+    schema = parser.parse(data)
+    if resolve_references:
+        _parse_ctx.resolve_references()
+    return schema
 
 
-def parse_docstring(data):
+def parse_docstring(data, resolve_references=False):
     """Parse function docstring (the ``data``) to :class:`Schema <Schema>`.
 
     The example docstring should contain a leader sign ``Schema::``, for
@@ -1091,7 +1100,5 @@ def parse_docstring(data):
             block += data[i]
         i += 1
 
-    print(block)
-
     if block:
-        return parse_schema(block)
+        return parse_schema(block, resolve_references=resolve_references)

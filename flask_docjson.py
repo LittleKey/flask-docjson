@@ -1102,3 +1102,17 @@ def parse_docstring(data, resolve_references=False):
 
     if block:
         return parse_schema(block, resolve_references=resolve_references)
+
+
+def parse_from_func(func, resolve_references=False):
+    """Parse docstring from view function ``func``.
+    Returns ``None`` if this ``func`` has no docstring.
+    """
+    docstring = getattr(func, '__doc__', None)
+    if docstring is None:
+        return
+    try:
+        return parse_docstring(docstring,
+                               resolve_references=resolve_references)
+    except _InternalParseError as exc:
+        raise_parse_error(func, exc)

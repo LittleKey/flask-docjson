@@ -667,6 +667,8 @@ class ParseContext(threading.local):
         self.references = []
         # Current working on view_function.
         self.current_func = None
+        # Whether this context is closed.
+        self.closed = False
 
     def set_current_func(self, func):
         """Set current parsing view function.
@@ -692,8 +694,8 @@ class ParseContext(threading.local):
         """Resolve all references to types, this will replace the ``ref_type``
         with the referenced original type.
 
-        Raises :class:`GrammarError <GrammarError>` if any referenced type
-        is not found.
+        Raises :exc:`~flask_docjson.GrammarError` if any referenced type is not
+        found.
 
         This should be called after all view functions are parsed.
         """
@@ -704,11 +706,26 @@ class ParseContext(threading.local):
                     "'{0}' at line {1}".format(ref.name,
                                                ref.lineno))
                 raise_parse_error(ref.func, exc)
-            ref.typ.orig_type = self.ref_type_map[ref.name]
+            if ref.typ.orig_type is None:  # Soft update
+                ref.typ.orig_type = self.ref_type_map[ref.name]
+
+    def close(self):
+        """Close this context."""
+        self.resolve_references()
+        self.closed = True
 
 
 # Global threading-local parse context.
-_parse_ctx = ParseContext()
+parse_ctx = None
+
+
+def init_parse_ctx():
+    """Construct global ``parse_ctx`` if it's ``None``, otherwise dose nothing.
+    """
+    global parse_ctx
+    if parse_ctx is None:
+        parse_ctx = ParseContext()
+    return parse_ctx
 
 
 def raise_parse_error(exc, func=None):
@@ -723,8 +740,8 @@ def raise_parse_error(exc, func=None):
     """
     if func:
         func_code = get_func_code(func)
-        msg = ('An error occurred on function {0} (defined at {1}:{2}), original '
-               'exception on its schema definition is:{3}')\
+        msg = ('An error occurred on function {0} (defined at {1}:{2}), '
+               'original exception on its schema definition is:{3}')\
             .format(func_code.co_name,
                     func_code.co_filename,
                     func_code.co_firstlineno,
@@ -952,14 +969,16 @@ def p_json_schema_as_ref(p):
     '''json_type_as_ref : json_schema_may_optional AS IDENTIFIER'''
     p[0] = p[1]
     # Register referenced type
-    _parse_ctx.register_ref_type(p[3], p[1], p.lineno)
+    init_parse_ctx()
+    parse_ctx.register_ref_type(p[3], p[1], p.lineno)
 
 
 def p_simple_type_as_ref(p):
     '''simple_type_as_ref : simple_type_may_optional AS IDENTIFIER '''
     p[0] = p[1]
     # Register referenced type
-    _parse_ctx.register_ref_type(p[3], p[1], p.lineno)
+    init_parse_ctx()
+    parse_ctx.register_ref_type(p[3], p[1], p.lineno)
 
 
 def p_ref_type_may_optional(p):
@@ -975,10 +994,11 @@ def p_ref_type(p):
     ref_typ = make_type(p[1], ref_type=True)
     p[0] = ref_typ
     # Record this reference for later replacement.
+    init_parse_ctx()
     reference = TypeReference(p[1], ref_typ,
                               lineno=p.lineno,
-                              func=_parse_ctx.current_func)
-    _parse_ctx.append_reference(reference)
+                              func=parse_ctx.current_func)
+    parse_ctx.append_reference(reference)
 
 
 def p_simple_type_may_optional(p):
@@ -1029,16 +1049,15 @@ def p_string_type(p):
         p[0] = make_type((p[1], p[3]))
 
 
-def parse_schema(data, resolve_references=False):
+def parse_schema(data, close_ctx=False):
     """Parse a single schema from ``data``. The ``data`` is the part insides
     the ``Schema::`` body.
     Returns parsed result, instance of :class:`Schema <Schema>`.
 
     :param data: The string schema block data to parse.
-    :param resolve_references: An optional boolean defaults to ``False``. When
-       set, references to types would be resloved right after the parse
-       finish. In normal case, the references would be resolved after all
-       schemas parsed.
+    :param close_ctx: An optional boolean value defaults to ``False``. When
+       set, ``parse_ctx`` will be closed right after this function called.
+
     """
     # Rebuild ``lexer`` and ``parser`` for each parsing to avoid some strange
     # errors, this is an unsolved issue.
@@ -1046,12 +1065,12 @@ def parse_schema(data, resolve_references=False):
     parser = yacc.yacc(debug=False, write_tables=0)
     lexer.lineno = 1
     schema = parser.parse(data)
-    if resolve_references:
-        _parse_ctx.resolve_references()
+    if close_ctx:
+        init_parse_ctx().close()
     return schema
 
 
-def parse_docstring(data, resolve_references=False):
+def parse_docstring(data, close_ctx=False):
     """Parse function docstring (the ``data``) to :class:`Schema <Schema>`.
 
     The example docstring should contain a leader sign ``Schema::``, for
@@ -1073,7 +1092,7 @@ def parse_docstring(data, resolve_references=False):
     i = 0
     block = ''
 
-    # Found leader sign
+    # Find leader sign.
     while i < len(data):
         j = i + sign_length
         if data[i:j] == S_SCHEMA:
@@ -1101,10 +1120,10 @@ def parse_docstring(data, resolve_references=False):
         i += 1
 
     if block:
-        return parse_schema(block, resolve_references=resolve_references)
+        return parse_schema(block, close_ctx=close_ctx)
 
 
-def parse_from_func(func, resolve_references=False):
+def parse_from_func(func, close_ctx=False):
     """Parse docstring from view function ``func``.
     Returns ``None`` if this ``func`` has no docstring.
     """
@@ -1113,6 +1132,6 @@ def parse_from_func(func, resolve_references=False):
         return
     try:
         return parse_docstring(docstring,
-                               resolve_references=resolve_references)
+                               close_ctx=close_ctx)
     except _InternalParseError as exc:
         raise_parse_error(func, exc)
